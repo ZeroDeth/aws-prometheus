@@ -131,7 +131,17 @@ Check the documentation to know more about what other Datasources Grafana suppor
  
  Hit `Save & Test`, a green bar should confirm all is working. You may even click on dashboard and enable the default 
  Prometheus Dashboard in Grafana.
- 
+
+### Updating the Stack
+
+In order to modify the stack I would strongly recommend to update the configuration file or the aws stack definition in the
+`aws` folder.
+
+Once you're happy with that, you can easily push the changes to aws issuing the command:
+```bash
+cd aws
+make update-stack
+```
 
 ### Automagically update configuration
 
