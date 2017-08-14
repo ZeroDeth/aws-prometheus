@@ -1,0 +1,93 @@
+# my global config
+global:
+  scrape_interval:     15s # By default, scrape targets every 15 seconds.
+  evaluation_interval: 15s # By default, scrape targets every 15 seconds.
+
+  # Attach these labels to any time series or alerts when communicating with
+  # external systems (federation, remote storage, Alertmanager).
+  external_labels:
+      monitor: '${GGTeam}'
+
+# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+#rule_files:
+#  - "team_X-rules.yml"
+#  - "team_X-alert-rules.yml"
+
+# A scrape configuration containing exactly one endpoint to scrape:
+# Here it's Prometheus itself.
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+  - job_name: 'prometheus'
+
+    # Override the global default and scrape targets from this job every 5 seconds.
+    scrape_interval: 5s
+
+    metrics_path: /prometheus/metrics
+    # scheme defaults to 'http'.
+
+    static_configs:
+      - targets: ['localhost:9090']
+
+# Prometheus AWS plugin to enable monitoring of your EC2 Instances. It fetches details about all EC2 instances in your account and manages Ec2 tags and instances attributes converting them into Prometheus Labels.
+#  - job_name: unlabelled_job
+#    ec2_sd_configs:
+#      - region: us-east-1
+#        port: 9000  # This is the default port number for your host. Set the port where majority of services will publish metrics.
+#
+#   The default metrics endpoint for your services. The default default is /metrics
+#    metrics_path: /_internal_/metrics
+#
+#   The next block is a list of filters for filtering-in and/or rename AWS Tags into Prometheus labels.
+#
+#   This selects only hosts whose ec2 tag *Name* is one of: my_service_name, another_service_name
+#    relabel_configs:
+#      - source_labels: [__meta_ec2_tag_Name]
+#        regex: (my_service_name|another_service_name)
+#        action: keep
+#
+#     Create a label named instance with the value of the ec2 instance id
+#      - source_labels: [__meta_ec2_instance_id]
+#        target_label: instance
+#
+#     Job is the most important label to individuate a job or (as in our case) a service. This rewrites the ec2 tag Name into job
+#      - source_labels: [__meta_ec2_tag_Name]
+#        target_label: job
+#
+#      - source_labels: [__meta_ec2_tag_Environment]
+#        target_label: environment
+#
+#     Example of service exposing metrics on a different port numeber
+#      - source_labels: [__address__, __meta_ec2_tag_Name]
+#        regex: (.+)(?::\d+);svc-sale-selector-v2
+#        action: replace
+#        target_label: __address__
+#        replacement: $1:8165
+#
+# The Node Exporter configuration, if you are using this stack, just uncomment this as the service is hosted in the same docker host
+#  - job_name: "node"
+#
+#    scrape_interval: 5s
+#
+#    ec2_sd_configs:
+#      - region: us-east-1
+#        port: 9100
+#
+#    relabel_configs:
+#      - source_labels: [__meta_ec2_tag_Name]
+#        regex: (my_service_name|another_service_name) # instances where the node exporter is running
+#        action: keep
+#
+#      - source_labels: [__meta_ec2_instance_id]
+#        target_label: instance
+#
+#      - source_labels: [__meta_ec2_tag_Name]
+#        target_label: job
+#
+#      - source_labels: [__meta_ec2_tag_Environment]
+#        target_label: environment
+#
+# Push gateway configuration. Also in this case, if you need, just uncomment
+#  - job_name: prometheus_pushgateway
+#    honor_labels: true
+#    static_configs:
+#      - targets: ['prometheus-pushgateway:9091']

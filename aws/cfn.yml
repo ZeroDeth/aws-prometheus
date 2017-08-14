@@ -1,0 +1,480 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Cloudformation Template
+Parameters:
+  DnsName:
+    Description: "The DNS where to bind the service to. Please note this has not to terminate by dot! It will be appended automatically when configuring the ELB"
+    Type: String
+  HostedZoneName:
+    Description: "The hosted zone where you want to deploy, eg. my-domain.my-company.com"
+    Type: String
+  InstanceType:
+    Type: String
+    Default: t2.medium
+  DiskSize:
+    Type: Number
+    Description: "Size of the Data volume where services data will be stored. This is a different volume form the root volume and will contain metrics and grafana data."
+    Default: 64
+  AmiId:
+    Type: String
+    Description: "The ami to launch the EC2 Instance with. Check here for more details: [AMI](https://aws.amazon.com/amazon-linux-ami/)"
+    Default: "ami-a4c7edb2"
+  KeyName:
+    Type: String
+  TargetGroupIdentifier:
+    Description: "Short name to distinguish possible multiple instance of the prometheus within same VPC"
+    Type: "String"
+    Default: "prom"
+  TargetSubnets:
+    Description: "List of VPC subnet IDs for the cluster. Note: must match up with the passed AvailabilityZones"
+    Type: "List<AWS::EC2::Subnet::Id>"
+  AvailabilityZones:
+    Description: "(Optional) If passed, only launch nodes in these AZs (e.g., 'us-east-1a,us-east-1b'). Note: these must match up with the passed Subnets."
+    Type: "String"
+    Default: ""
+  VpcId:
+    Description: VPC associated with the provided subnet
+    Type: AWS::EC2::VPC::Id
+  BastionCIDR:
+    Description: CIDR to allow SSH access from (e.g. your VPC bastion host)
+    Type: String
+  DNSHostedZone:
+    Type: String
+    Description: "The Hosted Zone Id, as long as you deploy in us-east-1, the default is ok for you!"
+    Default: "Z35SXDOTRQ7X7K"
+  GitHubEncryptedToken:
+    Type: String
+  GitHubProject:
+    Description: "The name of the forked project, this is fundamental as the config folder will be used to sync Prometheus configuration"
+    Type: String
+    Default: "nemo83/aws_prometheus_template.git"
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action: ['sts:AssumeRole']
+      Path: "/"
+      Policies:
+      - PolicyName: !Sub ${AWS::StackName}-policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            NotAction:
+            - iam:*
+            Resource: "*"
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: [!Ref Role]
+  LoadBalancerSecurityGroups:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Load Balancer Security Groups
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+  InstanceSecurityGroups:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Opens SSH (22) from Bastion and dynamic ports for the svc
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref BastionCIDR
+        - IpProtocol: tcp
+          FromPort: 1024
+          ToPort: 65535
+          SourceSecurityGroupId: !GetAtt ['LoadBalancerSecurityGroups', 'GroupId']
+  HostInstance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZones
+      EbsOptimized: true
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!Ref InstanceSecurityGroups]
+      SubnetId: !Select ["0", !Ref TargetSubnets]
+      Volumes:
+        - VolumeId: !Ref DataVolume
+          Device: /dev/xvdc
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash -ex
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource HostInstance -c createConfigSet --region ${AWS::Region}
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          createConfigSet:
+            - "first-launch"
+            - "update-config"
+            - "download-prometheus-config"
+            - "restart-prometheus-docker"
+          updateConfigSet:
+            - "update-config"
+            - "download-prometheus-config"
+            - "restart-prometheus-docker"
+          prometheusConfigUpdate:
+            - "download-prometheus-config"
+            - "reload-prometheus-config"
+        first-launch:
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: "true"
+                ensureRunning: "true"
+                files:
+                  - "/etc/cfn/cfn-hup.conf"
+                  - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+          packages:
+            yum:
+              git: []
+          commands:
+            A-00-Init-Volume:
+              cwd: "/root"
+              command: "/root/init-prometheus-data-volume.sh"
+            B-00-Python-Updates:
+              cwd: "/root"
+              command: "/root/python-updates.sh"
+          files:
+            "/root/init-prometheus-data-volume.sh":
+              content: !Sub |
+                #!/bin/bash
+                # This is required because the volume may not be attached yet
+                lsblk /dev/xvdc
+                while [ $? -ne 0 ];
+                do
+                  echo "Mountpoint /dev/xvdc not found, will try again soon"
+                  sleep 5
+                  lsblk /dev/xvdc
+                done
+                echo "Mountpoint found! Initialising it!"
+                sudo mkfs -t ext4 /dev/xvdc
+                mkdir -p /mnt/data
+                mount /dev/xvdc /mnt/data/
+                mkdir -p /mnt/data/prometheus /mnt/data/prometheus-gateway /mnt/data/grafana /etc/config
+                ## This one below is required otherwise docker won't see the new mounted drive!
+                sudo service docker restart
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            "/root/python-updates.sh":
+              content: !Sub |
+                #!/bin/bash
+                # Commenting as it may turn handy in the future
+                echo y | pip uninstall docker-py || true
+                echo y | pip uninstall docker || true
+                echo y | pip install docker || true
+                echo y | pip install docker-compose || true
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=3
+                verbose=true
+              mode: "000644"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reload-hook]
+                triggers=post.update
+                path=Resources.HostInstance.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource HostInstance -c updateConfigSet --region ${AWS::Region}
+                runas=root
+              mode: "000644"
+              owner: "root"
+              group: "root"
+        update-config:
+          files:
+            "/root/process-github-messages.py":
+              content: !Sub |
+                #!/usr/bin/python
+                import boto3
+                import subprocess
+
+                queue_url = 'https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${GithubNotificationsQueue.QueueName}'
+                client = boto3.client('sqs', region_name='${AWS::Region}')
+                response = client.receive_message(
+                    QueueUrl=queue_url
+                )
+
+                if 'Messages' in response.keys():
+
+                    bashCommand = "/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource HostInstance -c prometheusConfigUpdate --region ${AWS::Region}"
+                    process = subprocess.Popen(
+                        bashCommand.split(),
+                        stdout=subprocess.PIPE)
+
+                    process.communicate()
+
+                    delete_request = [{'Id': message['MessageId'], 'ReceiptHandle': message['ReceiptHandle']} for message in response['Messages']]
+
+                    client.delete_message_batch(
+                        QueueUrl=queue_url,
+                        Entries=delete_request
+                    )
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            "/root/encoded-encrypted-github-token":
+              content: !Sub |
+                ${GitHubEncryptedToken}
+              mode: "000644"
+              owner: "root"
+              group: "root"
+          commands:
+            A-00-Decode-GitHubToken:
+              cwd: "/root"
+              command: "base64 -d /root/encoded-encrypted-github-token > /root/encrypted-github-token"
+            A-01-Decrypt-GitHubToken:
+              cwd: "/root"
+              command: !Sub |
+                aws --region ${AWS::Region} kms decrypt --ciphertext-blob fileb:///root/encrypted-github-token --output text --query Plaintext | base64 -d > /root/github-token
+            B-01-Add-Prometheus-config-updated-cron:
+              cwd: "~"
+              command: !Sub |
+                echo "*/5 * * * * /root/process-github-messages.py" > /root/mycron
+            B-02-Install-new-cron:
+              cwd: "~"
+              command: !Sub |
+                crontab /root/mycron
+        restart-prometheus-docker:
+          commands:
+            A-00-Stop-Prometheus:
+              cwd: "~"
+              command: "/usr/local/bin/docker-compose -f /root/prometheus/docker-compose.yml down"
+            A-01-Start-Prometheus:
+              cwd: "~"
+              command: "/usr/local/bin/docker-compose -f /root/prometheus/docker-compose.yml up -d"
+          files:
+            "/root/prometheus/docker-compose.yml":
+              content: !Sub |
+                version: '2'
+                services:
+                  prometheus:
+                    image: prom/prometheus
+                    command:
+                      - "-config.file=/config/prometheus/prometheus.yml"
+                      - "-web.external-url=http://${DnsName}/prometheus"
+                      - "-storage.local.path=/prometheus"
+                      - "-alertmanager.url=http://prometheus-alertmanager:9093/alertmanager"
+                      - "-web.console.libraries=/etc/prometheus/console_libraries"
+                      - "-web.console.templates=/etc/prometheus/consoles"
+                    ports:
+                      - "9090:9090"
+                    volumes:
+                      - /etc/config/prometheus:/config/prometheus
+                      - /mnt/data/prometheus:/prometheus
+                    links:
+                      - alert-manager
+                      - push-gateway
+                  alert-manager:
+                    image: prom/alertmanager
+                    command:
+                      - "-config.file=/config/alertmanager/config.yml"
+                      - "-web.external-url=http://${DnsName}/alertmanager"
+                    ports:
+                      - "9093:9093"
+                    volumes:
+                      - /etc/config/alertmanager:/config/alertmanager
+                  push-gateway:
+                    image: prom/pushgateway
+                    command:
+                      - "-persistence.file=/data/pushgateway.dat"
+                    ports:
+                      - "9091:9091"
+                    volumes:
+                      - /mnt/data/prometheus-gateway:/data
+                  grafana:
+                    image: "grafana/grafana"
+                    ports:
+                      - "3000:3000"
+                    links:
+                      - prometheus
+                    volumes:
+                      - /mnt/data/grafana:/var/lib/grafana
+              mode: "000644"
+              owner: "root"
+              group: "root"
+        download-prometheus-config:
+          commands:
+            A-00-Fetch-Prometheus-Config:
+              cwd: "~"
+              command: "/root/fetch-configuration.sh"
+          files:
+            "/root/fetch-configuration.sh":
+              content: !Sub |
+                #!/bin/bash
+                rm -fr /root/prometheus/prometheus-project
+                git clone "https://`cat /root/github-token`@github.com/${GitHubProject}" /root/prometheus/prometheus-project
+                rsync -r /root/prometheus/prometheus-project/config/ /etc/config
+              mode: "000755"
+              owner: "root"
+              group: "root"
+        reload-prometheus-config:
+          commands:
+            A-00-Reload-Prometheus-Config:
+              cwd: "~"
+              command: "curl -X POST \"http://localhost:9090/prometheus/-/reload\""
+              ignoreErrors: true
+            A-01-Reload-Alertmanager-Config:
+              cwd: "~"
+              command: "curl -X POST \"http://localhost:9093/-/reload\""
+              ignoreErrors: true
+  DataVolume:
+    Type: "AWS::EC2::Volume"
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZones
+      Encrypted: false
+      Size: !Ref DiskSize
+      VolumeType: gp2
+  LoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: !Sub ${AWS::StackName}-ELB
+      Scheme: internal
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroups
+      Subnets: !Ref TargetSubnets
+  PrometheusTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: !Sub Prometheus-${TargetGroupIdentifier}
+      Port: 9090
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      Matcher:
+        HttpCode: 200-299,302
+      Targets:
+      - Id: !Ref HostInstance
+        Port: 9090
+  PrometheusGatewayTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: !Sub PrometheusGateway-${TargetGroupIdentifier}
+      Port: 9091
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      Matcher:
+        HttpCode: 200-299,302
+      Targets:
+      - Id: !Ref HostInstance
+        Port: 9091
+  AlertManagerTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: !Sub AlertManagerGateway-${TargetGroupIdentifier}
+      Port: 9093
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      Matcher:
+        HttpCode: 200-299,302
+      Targets:
+      - Id: !Ref HostInstance
+        Port: 9093
+  GrafanaTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Name: !Sub Grafana-${TargetGroupIdentifier}
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      Matcher:
+        HttpCode: 200-299,302
+      Targets:
+      - Id: !Ref HostInstance
+        Port: 3000
+  PrometheusPathListenerRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref PrometheusTargetGroup
+          Type: forward
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - "/prometheus*"
+      ListenerArn: !Ref ELBListener
+      Priority: 1
+  AlertManagerPathListenerRule:
+    Type: "AWS::ElasticLoadBalancingV2::ListenerRule"
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref AlertManagerTargetGroup
+          Type: forward
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - "/alertmanager*"
+      ListenerArn: !Ref ELBListener
+      Priority: 2
+  PrometheusGatewayListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref PrometheusGatewayTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 9091
+      Protocol: HTTP
+  AlertManagerGatewayListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref AlertManagerTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 9093
+      Protocol: HTTP
+  ELBListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref GrafanaTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+  DNSRecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub ${HostedZoneName}.
+      RecordSets:
+      - Name: !Sub ${DnsName}.
+        Type: A
+        Weight: '100'
+        SetIdentifier: cloudformation
+        AliasTarget:
+          EvaluateTargetHealth: false
+          HostedZoneId: !Ref DNSHostedZone
+          DNSName: !Sub dualstack.${LoadBalancer.DNSName}
+  GithubNotificationsQueue:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: !Sub gituhub-notifications-${AWS::StackName}

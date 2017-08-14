@@ -1,0 +1,41 @@
+[
+  {
+    "ParameterKey": "DnsName",
+    "ParameterValue": "XX.YY.my-company.com"
+  },
+  {
+    "ParameterKey": "HostedZoneName",
+    "ParameterValue": "YY.my-company.com"
+  },  {
+    "ParameterKey": "KeyName",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "m4.large"
+  },
+  {
+    "ParameterKey": "AvailabilityZones",
+    "ParameterValue": "us-east-1d"
+  },
+  {
+    "ParameterKey": "TargetSubnets",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "BastionCIDR",
+    "ParameterValue": "127.0.0.1"
+  },
+  {
+    "ParameterKey": "GitHubEncryptedToken",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "GitHubProject",
+    "ParameterValue": ""
+  }
+]
